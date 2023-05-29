@@ -1,10 +1,13 @@
 use std::{borrow::Cow, mem};
 
 use bytemuck::{Pod, Zeroable};
-use cgmath::{Matrix, Matrix4, SquareMatrix};
+use cgmath::{Matrix, Matrix4, Point3, SquareMatrix, Vector3};
 use wgpu::util::DeviceExt;
 use winit::{
-    event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent},
+    event::{
+        DeviceEvent, ElementState, Event, KeyboardInput, MouseScrollDelta, VirtualKeyCode,
+        WindowEvent,
+    },
     event_loop::{ControlFlow, EventLoop},
     window::Window,
 };
@@ -96,6 +99,12 @@ struct State {
     view_mat: Matrix4<f32>,
     project_mat: Matrix4<f32>,
     num_vertices: u32,
+
+    mouse_pressed: bool,
+    mouse_delta: (f32, f32),
+    zoom: f32,
+
+    camera_pos: Point3<f32>,
 }
 
 impl State {
@@ -121,7 +130,7 @@ impl State {
             });
 
         // Uniform Data
-        let camera_pos = (3.0, 1.75, 3.0).into();
+        let camera_pos = (3.0, 3.0, 3.0).into();
         let look_dir = (0.0, 0.0, 0.0).into();
         let up_dir = cgmath::Vector3::unit_y();
 
@@ -318,6 +327,10 @@ impl State {
             view_mat,
             project_mat,
             num_vertices,
+            mouse_pressed: false,
+            mouse_delta: (0.0, 0.0),
+            zoom: 1.0,
+            camera_pos: Point3::new(3.0, 3.0, 3.0),
         }
     }
 
@@ -338,21 +351,45 @@ impl State {
     }
 
     #[allow(unused_variables)]
-    fn input(&mut self, event: &WindowEvent) -> bool {
-        false
+    fn input(&mut self, event: &DeviceEvent) -> bool {
+        match event {
+            DeviceEvent::MouseMotion { delta } => {
+                if self.mouse_pressed {
+                    self.mouse_delta.0 += delta.0 as f32;
+                    self.mouse_delta.1 += delta.1 as f32;
+                }
+                true
+            }
+            DeviceEvent::MouseWheel { delta } => {
+                if let MouseScrollDelta::PixelDelta(pos) = delta {
+                    self.zoom += pos.y as f32;
+                }
+                true
+            }
+            DeviceEvent::Button { button: 1, state } => {
+                self.mouse_pressed = *state == ElementState::Pressed;
+                true
+            }
+            _ => false,
+        }
     }
 
+    const LOOK_DIR: Point3<f32> = Point3::new(0.0, 0.0, 0.0);
+    const UP_DIR: Vector3<f32> = Vector3::new(0.0, 1.0, 0.0);
+
     fn update(&mut self, dt: std::time::Duration) {
-        // Update the uniform buffer
         let dt = ANIMATION_SPEED * dt.as_secs_f32();
 
-        // Rotate the model matrix based on the time
-        let model_mat = transforms::create_transforms(
-            [0.0, 0.0, 0.0],
-            [dt.cos(), dt.sin(), 0.0],
-            [1.0, 1.0, 1.0],
-        );
-        let view_project_mat = self.project_mat * self.view_mat;
+        self.camera_pos.x += self.mouse_delta.0;
+        self.camera_pos.y += self.mouse_delta.1;
+        self.mouse_delta = (0.0, 0.0);
+
+        let view_mat = transforms::create_view(self.camera_pos, Self::LOOK_DIR, Self::UP_DIR);
+
+        let model_mat =
+            transforms::create_transforms([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        // Apparent the order fucking matters when doing matrix multiplication bruh
+        let view_project_mat = self.project_mat * view_mat;
 
         let normal_mat = model_mat.invert().unwrap().transpose();
 
@@ -469,30 +506,29 @@ pub fn run(
     event_loop.run(move |event, _, control_flow| {
         let start_time = std::time::Instant::now();
         match event {
+            Event::DeviceEvent { ref event, .. } => {
+                state.input(event);
+            }
             Event::WindowEvent {
                 ref event,
                 window_id,
-            } if window_id == window.id() => {
-                if !state.input(&event) {
-                    match event {
-                        WindowEvent::CloseRequested
-                        | WindowEvent::KeyboardInput {
-                            input:
-                                KeyboardInput {
-                                    state: ElementState::Pressed,
-                                    virtual_keycode: Some(VirtualKeyCode::Escape),
-                                    ..
-                                },
+            } if window_id == window.id() => match event {
+                WindowEvent::CloseRequested
+                | WindowEvent::KeyboardInput {
+                    input:
+                        KeyboardInput {
+                            state: ElementState::Pressed,
+                            virtual_keycode: Some(VirtualKeyCode::Escape),
                             ..
-                        } => *control_flow = ControlFlow::Exit,
-                        WindowEvent::Resized(physical_size) => state.resize(*physical_size),
-                        WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
-                            state.resize(**new_inner_size);
-                        }
-                        _ => {}
-                    }
+                        },
+                    ..
+                } => *control_flow = ControlFlow::Exit,
+                WindowEvent::Resized(physical_size) => state.resize(*physical_size),
+                WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
+                    state.resize(**new_inner_size);
                 }
-            }
+                _ => {}
+            },
             Event::RedrawRequested(_) => {
                 let now = std::time::Instant::now();
                 let dt = now - render_start_time;
